@@ -88,3 +88,73 @@ df.filter(df.aboveMeanFare==True).count()
 
 ## Group by vendor and check the avg values of each numerical column
 df.groupBy('VendorID').avg().show()
+
+## We can groupBy and then apply a fucntion in pandas inc ase it s way easeir too implementn or it is not possible in spark although thsi mgiht nnot be best practice
+from pyspark.sql.types import DoubleType, StructField
+from pyspark.sql.functions import lit
+
+def price_p_passenger(pandas_df):
+    return pandas_df.assign(priceppass=pandas_df.total_amount / pandas_df.passenger_count)
+
+df = df.withColumn('priceppass', lit(0.0))
+# In thsi way we are actually only applying that fucntiuoin per group, lets say we want to sum or divide by the average fo that group, the problem comes when creating a new variable as the apply in pandas will expect this new column to be already present
+#df.groupBy('VendorID').applyInPandas(price_p_passenger, schema=df.schema).show()
+
+
+## Another thing we can do is to cogroup for this we will load another dataset froma ntoher month also with the same column
+second_csv_path = './data/yellow_tripdata_2019-02.csv'
+
+df2 = spark.read.csv(second_csv_path, header=True, inferSchema=True)#header=True, inferSchema=True) cogroup returns a different type of object than groupBy alone.
+
+import pandas as pd
+
+def combine_avg_fares(key, left_iter, right_iter):
+    # If key is a tuple, take the first element, otherwise use it as is
+    vendor_id = key[0] if isinstance(key, tuple) else key
+    
+    left_df = pd.DataFrame(left_iter, columns=['fare_amount'])
+    right_df = pd.DataFrame(right_iter, columns=['fare_amount'])
+    
+    left_avg = left_df['fare_amount'].mean() if not left_df.empty else None
+    right_avg = right_df['fare_amount'].mean() if not right_df.empty else None
+    
+    return pd.DataFrame({
+        'VendorID': [int(vendor_id)],  # Use vendor_id instead of key
+        'left_avg_fare': [float(left_avg) if left_avg is not None else None],
+        'right_avg_fare': [float(right_avg) if right_avg is not None else None]
+    })
+
+result = df.groupBy('VendorID').cogroup(
+    df2.groupBy('VendorID')
+).applyInPandas(
+    combine_avg_fares,
+    "VendorID int, left_avg_fare double, right_avg_fare double"
+)
+
+# Calculate overall average and order results
+final_result = result.withColumn(
+    'overall_avg_fare',
+    (when(col('left_avg_fare').isNull(), 0).otherwise(col('left_avg_fare')) +
+     when(col('right_avg_fare').isNull(), 0).otherwise(col('right_avg_fare').cast('double'))) / 2
+).orderBy('overall_avg_fare')
+
+final_result.show()
+
+
+## Now lets use some SQL queries
+## Lets start registering the table in sql
+df.createOrReplaceTempView("TableA")
+
+## Let's count the rows in table A
+spark.sql("SELECT   count(*) from TableA").show()
+
+##UDFs can be registered and invoked in SQL out of the box:
+@pandas_udf("integer")
+def add_one(s: pd.Series) -> pd.Series:
+    return s + 1
+
+spark.udf.register("add_one", add_one)
+spark.sql("SELECT add_one(VendorID) FROM tableA").show()
+
+
+## MLib
